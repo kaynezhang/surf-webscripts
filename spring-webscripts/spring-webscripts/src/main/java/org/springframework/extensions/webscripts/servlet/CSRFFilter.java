@@ -20,13 +20,7 @@ package org.springframework.extensions.webscripts.servlet;
 
 import java.io.IOException;
 import java.security.SecureRandom;
-import java.util.Collections;
-import java.util.Date;
-import java.util.HashMap;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.Map;
-import java.util.Properties;
+import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -193,7 +187,7 @@ public class CSRFFilter implements Filter
      * Creates a rule object based on the config.
      *
      * @param ruleConfig The rule config element
-     * @return A rul eobject created form the config
+     * @return A rule object created form the config
      * @throws ServletException if the config is invalid
      */
     protected Rule createRule(final ConfigElement ruleConfig) throws ServletException
@@ -222,6 +216,34 @@ public class CSRFFilter implements Filter
                     headers.put(resolve(headerConfig.getAttribute("name")), resolve(value));
                 }
                 rule.setHeaders(headers);
+            }
+
+            // HTTP Basic Authentication
+            ConfigElement httpBasicAuthConfig = requestConfig.getChild("httpBasicAuth");
+            rule.setHttpBasicAuth(httpBasicAuthConfig != null);
+            if (httpBasicAuthConfig != null)
+            {
+                rule.setHttpBasicAuth(true);
+                ConfigElement cookieConfig = httpBasicAuthConfig.getChild("cookie");
+                if (cookieConfig != null)
+                {
+                    List<ConfigElement> attributeConfigs = cookieConfig.getChildren("attribute");
+                    if (attributeConfigs != null && attributeConfigs.size() > 0)
+                    {
+                        Map<String, String> cookieAttributes = new HashMap<String, String>();
+                        String value;
+                        for (ConfigElement attributeConfig: attributeConfigs)
+                        {
+                            value = attributeConfig.getValue();
+                            cookieAttributes.put(attributeConfig.getAttribute("name"), resolve(value));
+                        }
+                        rule.setCookieAttributes(cookieAttributes);
+                    }
+                }
+            }
+            else
+            {
+                rule.setHttpBasicAuth(false);
             }
             
             // Session
@@ -407,45 +429,75 @@ public class CSRFFilter implements Filter
                 }
             }
         }
-        
-        // Match session attributes (if specified)
-        boolean matched = true;
-        Map<String, String> sessionAttributes = rule.getSessionAttributes();
-        if (sessionAttributes != null && sessionAttributes.size() != 0)
+
+        // Match HTTP Basic attributes (if specified)
+        if (rule.getHttpBasicAuth() && request.getHeader("Authorization") != null)
         {
-            if (session == null)
+            Map<String, String> cookieAttributes = rule.getCookieAttributes();
+            if (cookieAttributes != null && cookieAttributes.size() != 0)
             {
-                matched = false;
-            }
-            else
-            {
-                for (final String name: sessionAttributes.keySet())
+                for (String name: cookieAttributes.keySet())
                 {
-                    Object value = session.getAttribute(name);
-
-                    // If the session attribute is a list of strings (i.e. tokens) lets make sure to check against the last position
-                    if (value instanceof List)
+                    Cookie[] cookies = request.getCookies();
+                    if (cookies != null)
                     {
-                        List list = (List) value;
-                        value = list.get(list.size() - 1);
+                        for (Cookie cookie: cookies)
+                        {
+                            if (cookie.getName().equals(name))
+                            {
+                                if (!matchString(cookie.getValue(), cookieAttributes.get(name)))
+                                {
+                                    return false;
+                                }
+                            }
+                        }
                     }
+                }
 
-                    if (value != null && !(value instanceof String))
+                return !request.getMethod().equals("POST") &&
+                    !request.getMethod().equals("PUT") &&
+                    !request.getMethod().equals("DELETE");
+            }
+        }
+        else
+        {
+            // Match session attributes (if specified)
+            Map<String, String> sessionAttributes = rule.getSessionAttributes();
+            if (sessionAttributes != null && sessionAttributes.size() != 0)
+            {
+                if (session == null)
+                {
+                    return false;
+                }
+                else
+                {
+                    for (final String name: sessionAttributes.keySet())
                     {
-                        // We can't match a non string and non null value with a string, so return false
-                        matched = false;
-                        break;
-                    }
+                        Object value = session.getAttribute(name);
 
-                    if (!matchString((String) value, sessionAttributes.get(name)))
-                    {
-                        matched = false;
-                        break;
+                        // If the session attribute is a list of strings (i.e. tokens) lets make sure to check against the last position
+                        if (value instanceof List)
+                        {
+                            List list = (List) value;
+                            value = list.get(list.size() - 1);
+                        }
+
+                        if (value != null && !(value instanceof String))
+                        {
+                            // We can't match a non string and non null value with a string, so return false
+                            return false;
+                        }
+
+                        if (!matchString((String) value, sessionAttributes.get(name)))
+                        {
+                            return false;
+                        }
                     }
                 }
             }
         }
-        return matched;
+
+        return true;
     }
 
     /**
@@ -503,6 +555,8 @@ public class CSRFFilter implements Filter
         protected String method;
         protected String path;
         protected Map<String, String> headers;
+        protected boolean httpBasicAuth;
+        protected Map<String, String> cookieAttributes;
         protected Map<String, String> sessionAttributes;
         protected List<Action> actions;
         
@@ -535,7 +589,21 @@ public class CSRFFilter implements Filter
         {
             this.headers = headers;
         }
-        
+
+        public boolean getHttpBasicAuth() { return httpBasicAuth; }
+
+        public void setHttpBasicAuth(boolean httpBasicAuth)
+        {
+            this.httpBasicAuth = httpBasicAuth;
+        }
+
+        public Map<String, String> getCookieAttributes() { return cookieAttributes; }
+
+        public void setCookieAttributes(Map<String, String> cookieAttributes)
+        {
+            this.cookieAttributes = cookieAttributes;
+        }
+
         public Map<String, String> getSessionAttributes()
         {
             return sessionAttributes;
@@ -843,6 +911,22 @@ public class CSRFFilter implements Filter
             {
                 sessionTokens = (List<String>) httpSession.getAttribute(session);
             }
+
+            if (sessionTokens == null && httpServletRequest.getHeader("Authorization") != null)
+            {
+                Cookie[] cookies = httpServletRequest.getCookies();
+                if (cookies != null)
+                {
+                    for (Cookie cookie: cookies)
+                    {
+                        if (cookie.getName().equals(session))
+                        {
+                            sessionTokens = Arrays.asList(cookie.getValue());
+                        }
+                    }
+                }
+            }
+
             if (header != null)
             {
                 String headerToken = httpServletRequest.getHeader(header);
